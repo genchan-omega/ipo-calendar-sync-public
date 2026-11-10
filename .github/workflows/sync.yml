@@ -1,0 +1,64 @@
+name: sync-ipo-calendar
+on:
+  schedule:
+    - cron: "30 16 * * *" # daily at 01:30 JST (16:30 UTC). Edit to change the time.
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "Dry run: show what would be registered without writing"
+        type: boolean
+        default: false
+      selftest:
+        description: "Write test: create a test event in 2030, read it back, delete it"
+        type: boolean
+        default: false
+permissions:
+  contents: read
+concurrency:
+  group: sync-ipo-calendar
+  cancel-in-progress: false
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      GOOGLE_SERVICE_ACCOUNT_JSON: ${{ secrets.GOOGLE_SERVICE_ACCOUNT_JSON }}
+      GOOGLE_CALENDAR_ID: ${{ secrets.GOOGLE_CALENDAR_ID }}
+      DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
+      IPO_TITLE_PREFIX: ${{ vars.IPO_TITLE_PREFIX }}
+      IPO_COLOR_ID: ${{ vars.IPO_COLOR_ID }}
+      IPO_REMINDERS: ${{ vars.IPO_REMINDERS }}
+      IPO_SHOW_AS: ${{ vars.IPO_SHOW_AS }}
+      NOTIFY_FILE: /tmp/notify.txt
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install -r requirements.txt
+      - run: python -m pytest -q
+      - name: Fetch SBI IPO list and register new book-building periods
+        run: python -m ipo_sync ${{ inputs.selftest && '--selftest' || (inputs.dry_run && '--dry-run' || '') }}
+      - name: Notify Discord about new events or date changes
+        if: success() && env.DISCORD_WEBHOOK_URL != ''
+        run: |
+          if [ -s "$NOTIFY_FILE" ]; then
+            python - <<'PY'
+          import json, os, urllib.request
+          msg = open(os.environ["NOTIFY_FILE"], encoding="utf-8").read().strip()
+          req = urllib.request.Request(os.environ["DISCORD_WEBHOOK_URL"],
+              data=json.dumps({"content": msg}).encode(), headers={"Content-Type": "application/json", "User-Agent": "ipo-calendar-sync"})
+          urllib.request.urlopen(req, timeout=20)
+          PY
+          fi
+      - name: Notify Discord on failure
+        if: failure() && env.DISCORD_WEBHOOK_URL != ''
+        run: |
+          python - <<'PY'
+          import json, os, urllib.request
+          url = f"{os.environ['GITHUB_SERVER_URL']}/{os.environ['GITHUB_REPOSITORY']}/actions/runs/{os.environ['GITHUB_RUN_ID']}"
+          req = urllib.request.Request(os.environ["DISCORD_WEBHOOK_URL"],
+              data=json.dumps({"content": f"ipo-calendar-sync failed: {url}"}).encode(),
+              headers={"Content-Type": "application/json", "User-Agent": "ipo-calendar-sync"})
+          urllib.request.urlopen(req, timeout=20)
+          PY
